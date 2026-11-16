@@ -36,11 +36,8 @@ rtt = st.number_input(
 )
 
 
-# Cwnd 그래프 테스트용 임시 데이터 (삭제 예정) ----
-data = pd.DataFrame({
-    "Round": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-    "Cwnd": [1, 2, 4, 8, 16, 8, 9, 10, 11, 12]
-})
+# (수정) Cwnd 그래프 테스트용 임시 데이터 삭제 후 알고리즘 연동
+from tcp_algorithm import generate_simulation_data
 
 
 # 시뮬레이션 실행 및 결과 표시 ----
@@ -49,6 +46,13 @@ if st.button("시뮬레이션 실행"):
     st.write("알고리즘:", algorithm)
     st.write("패킷 손실률:", loss_rate, "%")
     st.write("RTT:", rtt, "ms")
+    
+# (추가) 버튼을 누를 때 선택한 옵션값으로 시뮬레이션 데이터를 생성
+    data = generate_simulation_data(
+        algorithm=algorithm, 
+        loss_rate=loss_rate, 
+        total_rounds=20
+    )
 
     # Cwnd 실시간 그래프
     st.subheader("Cwnd 변화 그래프")
@@ -57,8 +61,9 @@ if st.button("시뮬레이션 실행"):
     for i in range(len(data)):
         current_data = data.iloc[:i+1]
 
+# (수정) cwnd열만 출력되도록 지
         chart.line_chart(
-            current_data.set_index("Round"),
+            current_data.set_index("Round")[["Cwnd"]],
             x_label="Round",
             y_label="Cwnd (MSS)"
         )
