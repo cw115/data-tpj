@@ -4,6 +4,7 @@ import random
 import time
 import pandas as pd
 import streamlit as st
+from socket_module import run_socket_simulation
 
 # 기본 화면 ----
 st.set_page_config(
@@ -42,34 +43,31 @@ def inject_network_impairment(loss_rate: float, rtt_ms: float) -> dict:
 
 
 # 백엔드(소켓/알고리즘 엔진) 연동용 데이터 수신 인터페이스 ----
+
+# 실제 소켓 통신 데이터 수신 인터페이스
 def stream_simulation_data(algorithm: str, loss_rate: int, rtt: int, rounds: int = 10):
     """
-    가상 장애 주입 결과를 반영해 라운드별 시뮬레이션 데이터를 생성합니다.
-    실제 엔진 연동 시 소켓 송수신 및 Tahoe/Reno 계산 로직과 결합합니다.
+    팀원들이 구현한 소켓 통신과 TCP 혼잡 제어 결과를 받아
+    Streamlit UI에서 사용할 수 있는 형태로 변환합니다.
     """
-    cwnd = 1
-    ssthresh = 8
 
-    for round_num in range(1, rounds + 1):
-        impairment = inject_network_impairment(loss_rate=loss_rate, rtt_ms=rtt)
+    result = run_socket_simulation(
+        algorithm=algorithm,
+        loss_rate=loss_rate,
+        rtt=rtt,
+        total_rounds=rounds,
+        save_files=True
+    )
 
-        if impairment["is_dropped"]:
-            event = "Packet Loss"
-            ssthresh = max(2, cwnd // 2)
-            cwnd = 1 if algorithm == "Tahoe" else max(1, ssthresh)
-        else:
-            event = "ACK Received"
-            if cwnd < ssthresh:
-                cwnd *= 2
-            else:
-                cwnd += 1
+    data = result["dataframe"]
 
+    for _, packet in data.iterrows():
         yield {
-            "Round": round_num,
-            "Cwnd": cwnd,
-            "Ssthresh": ssthresh,
-            "Event": event,
-            "DelaySec": impairment["delay_sec"],
+            "Round": int(packet["Round"]),
+            "Cwnd": float(packet["Cwnd"]),
+            "Ssthresh": float(packet["ssthresh"]),
+            "Event": str(packet["State"]),
+            "DelaySec": rtt / 1000.0,
             "Algorithm": algorithm,
             "LossRate": loss_rate,
             "RTT": rtt,
