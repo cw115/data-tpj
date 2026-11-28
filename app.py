@@ -1,4 +1,5 @@
-#cd data-tpj
+
+# cd data-tpj
 # python -m streamlit run app.py
 
 import random
@@ -6,6 +7,7 @@ import time
 import pandas as pd
 import streamlit as st
 from socket_module import run_socket_simulation
+
 
 # 기본 화면 ----
 st.set_page_config(
@@ -17,40 +19,23 @@ st.title("TCP 혼잡 제어 시뮬레이터")
 st.write("TCP Tahoe / Reno 혼잡 제어 동작 시각화")
 
 
-# 가상 장애 주입 함수 설계 ----
+# 가상 장애 주입 함수 ----
 def inject_network_impairment(loss_rate: float, rtt_ms: float) -> dict:
-    """
-    패킷 손실률(0~20%)과 RTT(0~500ms)를 기준으로 가상 네트워크 장애를 주입합니다.
-
-    반환값:
-        - is_dropped (bool): 패킷 손실 발생 여부
-        - delay_sec (float): 적용할 지연 시간(초)
-    """
     clamped_loss = max(0.0, min(20.0, float(loss_rate)))
     clamped_rtt = max(0.0, min(500.0, float(rtt_ms)))
 
-    # 패킷 손실 판정 (0~100 난수 기반)
-    is_dropped = random.uniform(0.0, 100.0) < clamped_loss
-
-    # RTT 기반 지연 시간 계산 (밀리초 -> 초 변환)
-    delay_sec = clamped_rtt / 1000.0
-
     return {
-        "is_dropped": is_dropped,
-        "delay_sec": delay_sec,
+        "is_dropped": random.uniform(0.0, 100.0) < clamped_loss,
+        "delay_sec": clamped_rtt / 1000.0,
         "applied_loss": clamped_loss,
         "applied_rtt_ms": clamped_rtt,
     }
 
 
-# 백엔드(소켓/알고리즘 엔진) 연동용 데이터 수신 인터페이스 ----
-
-# 실제 소켓 통신 데이터 수신 인터페이스
+# 백엔드 데이터 수신 인터페이스 ----
 def stream_simulation_data(algorithm: str, loss_rate: int, rtt: int, result: dict):
 
-    data = result["dataframe"]
-
-    for _, packet in data.iterrows():
+    for _, packet in result["dataframe"].iterrows():
         yield {
             "Round": int(packet["Round"]),
             "Cwnd": float(packet["Cwnd"]),
@@ -70,6 +55,14 @@ def stream_simulation_data(algorithm: str, loss_rate: int, rtt: int, result: dic
         }
 
 
+# 실행 결과 및 오류 상태 초기화 ----
+if "simulation_result" not in st.session_state:
+    st.session_state["simulation_result"] = None
+
+if "simulation_error" not in st.session_state:
+    st.session_state["simulation_error"] = None
+
+
 # 시뮬레이션 설정 UI ----
 st.subheader("시뮬레이션 설정")
 
@@ -80,9 +73,7 @@ algorithm = st.selectbox(
 
 loss_rate = st.slider(
     "패킷 손실률 (%)",
-    min_value=0,
-    max_value=20,
-    value=5
+    0, 20, 5
 )
 
 rtt = st.number_input(
@@ -99,73 +90,143 @@ total_rounds = st.number_input(
     value=10
 )
 
+settings = {
+    "algorithm": algorithm,
+    "loss_rate": int(loss_rate),
+    "rtt": int(rtt),
+    "total_rounds": int(total_rounds),
+}
 
-# 시뮬레이션 실행 및 결과 표시 ----
-if st.button("시뮬레이션 실행"):
-    st.success("시뮬레이션 설정 완료!")
-    st.write("알고리즘:", algorithm)
-    st.write("패킷 손실률:", loss_rate, "%")
-    st.write("RTT:", rtt, "ms")
+run_clicked = st.button("시뮬레이션 실행")
+
+
+# 실행 및 재실행 상태 관리 ----
+if run_clicked:
+
+    # 이전 결과와 오류 초기화
+    st.session_state["simulation_result"] = None
+    st.session_state["simulation_error"] = None
+
+    try:
+        with st.spinner("시뮬레이션 실행 중입니다..."):
+
+            # 가상 장애 주입 함수 연결
+            result = run_socket_simulation(
+                **settings,
+                save_files=True,
+                impairment_fn=inject_network_impairment
+            )
+
+            records = list(stream_simulation_data(
+                algorithm=algorithm,
+                loss_rate=int(loss_rate),
+                rtt=int(rtt),
+                result=result,
+            ))
+
+            if not records:
+                raise ValueError("시뮬레이션 결과 데이터가 없습니다.")
+
+            # 실행 조건과 결과를 함께 저장
+            st.session_state["simulation_result"] = {
+                "settings": settings.copy(),
+                "result": result,
+                "records": records,
+            }
+
+    except Exception as exc:
+        st.session_state["simulation_error"] = str(exc)
+
+
+saved = st.session_state["simulation_result"]
+error = st.session_state["simulation_error"]
+
+
+# 오류 및 초기 화면 안내 ----
+if error is not None:
+    st.error(f"시뮬레이션 실행 실패: {error}")
+
+if saved is None and error is None:
+    st.info("조건을 설정한 후 시뮬레이션 실행 버튼을 눌러주세요.")
+
+
+# 저장된 실행 결과 표시 ----
+if saved is not None:
+
+    used = saved["settings"]
+    result = saved["result"]
+    records = saved["records"]
+
+    # 설정 변경 시 이전 실행 결과임을 안내
+    if settings != used:
+        st.warning(
+            "설정이 변경되었습니다. 아래는 이전 실행 결과입니다. "
+            "다시 실행하면 새 결과가 표시됩니다."
+        )
+
+    st.write(
+        f"실행 조건: {used['algorithm']} | "
+        f"패킷 손실률: {used['loss_rate']}% | "
+        f"RTT: {used['rtt']} ms | "
+        f"라운드: {used['total_rounds']}"
+    )
+
+    current_df = pd.DataFrame(records).set_index("Round")
+
+    graph_df = current_df[["Cwnd", "Ssthresh"]].rename(
+        columns={"Ssthresh": "ssthresh"}
+    )
 
     status_box = st.empty()
+
     st.subheader("Cwnd / ssthresh 변화 그래프")
     chart = st.empty()
 
-    records = []
+    # 새 실행에서만 그래프를 라운드별로 재생
+    if run_clicked:
 
-    result = run_socket_simulation(
-        algorithm=algorithm,
-        loss_rate=loss_rate,
-        rtt=int(rtt),
-        total_rounds=int(total_rounds),
-        save_files=True
-    )
+        for i, packet_info in enumerate(records):
 
-    for packet_info in stream_simulation_data(
-        algorithm=algorithm,
-        loss_rate=loss_rate,
-        rtt=int(rtt),
-        result=result,
-    ):
-        records.append({
-            "Round": packet_info["Round"],
-            "Cwnd": packet_info["Cwnd"],
-            "ssthresh": packet_info["Ssthresh"],
-            "State": packet_info["State"],
-            "Event": packet_info["Event"],
-            "DupAck": packet_info["DupAck"],
-            "Sent_Packets": packet_info["Sent_Packets"],
-            "Ack_Received": packet_info["Ack_Received"],
-            "Dropped_Packets": packet_info["Dropped_Packets"],
-            "Delayed_Packets": packet_info["Delayed_Packets"],
-            "Total_Delay_Sec": packet_info["Total_Delay_Sec"],
-        })
-        current_df = pd.DataFrame(records).set_index("Round")
+            status_box.info(
+                f"결과 표시 중 | "
+                f"Round {packet_info['Round']}/{used['total_rounds']} | "
+                f"Cwnd: {packet_info['Cwnd']} MSS | "
+                f"ssthresh: {packet_info['Ssthresh']} MSS | "
+                f"상태: {packet_info['State']} | "
+                f"이벤트: {packet_info['Event']} | "
+                f"중복 ACK: {packet_info['DupAck']}"
+            )
 
-        status_box.info(
-            f"Round {packet_info['Round']}/{int(total_rounds)} | "
-            f"Cwnd: {packet_info['Cwnd']} MSS | "
-            f"ssthresh: {packet_info['Ssthresh']} MSS | "
-            f"상태: {packet_info['State']} | "
-            f"이벤트: {packet_info['Event']} | "
-            f"중복 ACK: {packet_info['DupAck']}"
-        )
+            chart.line_chart(
+                graph_df.iloc[:i + 1],
+                x_label="Round",
+                y_label="Window Size (MSS)"
+            )
+
+            time.sleep(
+                max(0.05, min(0.8, packet_info["DelaySec"]))
+            )
+
+    else:
+        # 설정 변경 등으로 화면이 다시 실행되어도
+        # 저장된 결과를 유지하고 소켓은 재호출하지 않음
         chart.line_chart(
-            current_df[["Cwnd", "ssthresh"]],
+            graph_df,
             x_label="Round",
             y_label="Window Size (MSS)"
         )
 
-        # 화면이 너무 오래 멈추지 않도록 시각적 대기 시간 상한 설정
-        time.sleep(max(0.05, min(0.8, packet_info["DelaySec"])))
+    last = records[-1]
 
     status_box.success(
         f"시뮬레이션 완료! | "
-        f"최종 상태: {packet_info['State']} | "
-        f"최종 이벤트: {packet_info['Event']} | "
-        f"중복 ACK: {packet_info['DupAck']}"
+        f"최종 상태: {last['State']} | "
+        f"최종 이벤트: {last['Event']} | "
+        f"중복 ACK: {last['DupAck']}"
     )
 
+
+    # 라운드별 패킷 정보 ----
     st.subheader("라운드별 패킷 손실 및 지연 정보")
 
     st.dataframe(
@@ -181,7 +242,8 @@ if st.button("시뮬레이션 실행"):
         ]]
     )
 
-        # 통계 분석 요약
+
+    # 통계 분석 요약 ----
     st.subheader("통계 분석 요약")
 
     analysis = result["analysis"]
@@ -196,15 +258,34 @@ if st.button("시뮬레이션 실행"):
 
     col4.metric("총 송신 패킷", analysis["Total_Sent_Packets"])
     col5.metric("총 손실 패킷", analysis["Total_Dropped_Packets"])
-    col6.metric("집계 손실률", f"{analysis['Actual_Channel_Loss(%)']}%")
+    col6.metric(
+        "집계 손실률",
+        f"{analysis['Actual_Channel_Loss(%)']}%"
+    )
 
-    st.write("혼잡 제어 손실 이벤트 수:", analysis["Loss_Event_Count"])
-    st.write("지연 패킷 수:", analysis["Total_Delayed_Packets"])
-    st.write("누적 송신 측 지연 시간:", analysis["Total_Delay_Sec"], "초")
+    st.write(
+        "혼잡 제어 손실 이벤트 수:",
+        analysis["Loss_Event_Count"]
+    )
 
-    st.caption("집계 손실률은 백엔드 계산 기준이며, 누적 지연 시간은 실제 측정 RTT와 다릅니다.")
+    st.write(
+        "지연 패킷 수:",
+        analysis["Total_Delayed_Packets"]
+    )
 
-    # 패킷 덤프 표시
+    st.write(
+        "누적 송신 측 지연 시간:",
+        analysis["Total_Delay_Sec"],
+        "초"
+    )
+
+    st.caption(
+        "집계 손실률은 백엔드 계산 기준이며, "
+        "누적 지연 시간은 실제 측정 RTT와 다릅니다."
+    )
+
+
+    # 패킷 덤프 표시 ----
     st.subheader("패킷 덤프")
 
     packet_dumps = result["packet_dumps"]
